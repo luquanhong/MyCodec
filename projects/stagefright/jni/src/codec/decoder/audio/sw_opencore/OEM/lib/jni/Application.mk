@@ -1,0 +1,1 @@
+APP_MODULES := libpv_aac_dec
