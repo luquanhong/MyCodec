@@ -1,5 +1,5 @@
-CODEC_PATH	= $(PROJECT_PATH)/src/codecs/decoder/video/hw_stagefright_jellybean43
-CODEC_R_PATH := src/codecs/decoder/video/hw_stagefright_jellybean43
+CODEC_PATH	= $(PROJECT_PATH)/src/codec/decoder/video/hw_stagefright_jellybean43
+CODEC_R_PATH := src/codec/decoder/video/hw_stagefright_jellybean43
 
 #OEM_INC	+= \
 		$(CODEC_PATH)/OEM/include/frameworks/native/include \

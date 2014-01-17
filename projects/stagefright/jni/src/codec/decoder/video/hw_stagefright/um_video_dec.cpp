@@ -28,7 +28,22 @@
 #include "um_sys_thread.h"
 #include "um_sys_log.h"
 
+#ifndef INT64_C
+#define INT64_C(c) (c ## LL)
+#define UINT64_C(c) (c ## ULL)
+#endif 
+
+extern "C" {
+#include "libavcodec/avcodec.h"
+#include "libavutil/imgutils.h"
+#include "libavutil/pixfmt.h"
+//#include "internal.h"
+}
+
 using namespace android;
+
+
+
 
 struct Frame {
     int status;
@@ -39,7 +54,7 @@ struct Frame {
 //    AVFrame *vframe;
 };
 
-int pix_fmt;
+enum PixelFormat pix_fmt;
 
 struct StagefrightContext {
 
@@ -48,6 +63,7 @@ struct StagefrightContext {
     List<Frame*> *in_queue, *out_queue;
     pthread_mutex_t in_mutex, out_mutex;
     pthread_cond_t condition;
+    pthread_cond_t condition2;
     pthread_t decode_thread_id;
 
     Frame *end_frame;
@@ -66,6 +82,64 @@ struct StagefrightContext {
     sp<MediaSource> *decoder;
     const char *decoder_component;
 };
+
+
+
+static unsigned int m_um_sys_currTick_baseline = 0;
+
+/*!
+*	\brief	get the system tick
+*/
+static UMUint32 get_countTick(void)
+{
+	struct timeval time_val;
+	struct timezone junk;
+
+	//unsigned long long totalMilliseconds;
+	unsigned short al,bl,ah;
+	unsigned int tmp,totalMillisecondsHi,totalMillisecondsLo;
+
+	gettimeofday(&time_val, &junk);
+
+    al = (unsigned short)time_val.tv_sec;
+    bl = (unsigned short)1000;
+    ah = (unsigned short)(time_val.tv_sec >> 16);    
+   
+	totalMillisecondsLo = al * bl;	
+   
+    tmp = ah * bl;				
+    totalMillisecondsHi = tmp >> 16; 
+    tmp <<= 16;
+    totalMillisecondsLo += tmp;
+    if (totalMillisecondsLo < tmp)
+        ++totalMillisecondsHi; 
+    totalMillisecondsLo += time_val.tv_usec / 1000;
+    totalMillisecondsHi += (totalMillisecondsLo < time_val.tv_usec / 1000);
+	
+  	return (UMUint32)(totalMillisecondsLo&0xffffffff);
+}
+
+/*!
+*	\brief	Get the baseline tick when mediasource instance create.
+*/
+void um_time_init()
+{
+	m_um_sys_currTick_baseline = get_countTick();
+}
+
+
+/*!
+*	\brief	Get the relative tike from baseline tick.
+*/
+UMUint um_util_getCurrentTick(void)
+{
+	return (get_countTick() - m_um_sys_currTick_baseline);
+}
+
+
+
+
+
 
 class CustomSource : public MediaSource {
 public:
@@ -91,6 +165,17 @@ public:
 
     virtual int read(MediaBuffer **buffer,
                           const MediaSource::ReadOptions *options) {
+                          
+    if(timepos == 0)
+	{
+		timepos = um_util_getCurrentTick();//!< Get the current tick
+	}
+
+	if(mcurrenttimeus == 0)
+	{
+		mcurrenttimeus = um_util_getCurrentTick();
+	}                  
+                          
         Frame *frame;
         int ret;
         UMLOG_ERR("===CustomSource read");
@@ -99,32 +184,37 @@ public:
             return -1;
         pthread_mutex_lock(&s->in_mutex);
 
-        UMLOG_ERR("===CustomSource read 1");
+        //UMLOG_ERR("===CustomSource read 1");
         while (s->in_queue->empty()){
             UMLOG_ERR("===CustomSource read 2");
             pthread_cond_wait(&s->condition, &s->in_mutex);
         }
-        UMLOG_ERR("===CustomSource read 3");
+        //UMLOG_ERR("===CustomSource read 3");
         frame = *s->in_queue->begin();
         ret = frame->status;
-        UMLOG_ERR("===CustomSource read data");
+        //UMLOG_ERR("===CustomSource read data");
+        
+        #if 1
         if (ret == OK) {
             ret = buf_group.acquire_buffer(buffer);
             if (ret == OK) {
                 memcpy((*buffer)->data(), frame->buffer, frame->size);
-                UMLOG_ERR("===CustomSource read data 1 frame->size is %d", frame->size);
+                //UMLOG_ERR("===CustomSource read data 1 frame->size is %d", frame->size);
                 (*buffer)->set_range(0, frame->size);
-                UMLOG_ERR("===CustomSource read data 2");
+                //UMLOG_ERR("===CustomSource read data 2");
                 (*buffer)->meta_data()->clear();
-                UMLOG_ERR("===CustomSource read data 3");
-                //(*buffer)->meta_data()->setInt32(kKeyIsSyncFrame,frame->key);
-                (*buffer)->meta_data()->setInt64(kKeyTime, 0);
-                UMLOG_ERR("===CustomSource read data 4");
+                //UMLOG_ERR("===CustomSource read data 3");
+                //(*buffer)->meta_data()->setInt32(kKeyIsSyncFrame,1);
+                
+                mcurrenttimeus += (um_util_getCurrentTick() - timepos) * 1000;
+                (*buffer)->meta_data()->setInt64(kKeyTime, mcurrenttimeus);
+                //UMLOG_ERR("===CustomSource read data 4");
             } else {
-                //av_log(s->avctx, AV_LOG_ERROR, "Failed to acquire MediaBuffer\n");
+                UMLOG_ERR("Failed to acquire MediaBuffer\n");
             }
             free(frame->buffer);
         }
+        #endif
     
         s->in_queue->erase(s->in_queue->begin());
         pthread_mutex_unlock(&s->in_mutex);
@@ -139,8 +229,12 @@ private:
     sp<MetaData> source_meta;
     StagefrightContext *s;
     int frame_size;
+    long		timepos;
+	int64_t		mcurrenttimeus;
 };
 
+FILE* fd;
+static int dcount;
 
 void* decode_thread(void *arg)
 {
@@ -149,21 +243,28 @@ void* decode_thread(void *arg)
     UMLOG_ERR("decode_thread create.");
     UM_VideoDecoderCtx *avctx = (UM_VideoDecoderCtx*)arg;
     StagefrightContext *priv = (StagefrightContext*)avctx->priv;
-MediaSource::ReadOptions options;
+    MediaSource::ReadOptions options;
     Frame* frame;
     MediaBuffer *buffer;
     int32_t w, h;
     int decode_done = 0;
     int ret;
+    
+    int src_linesize[3];
+    const uint8_t *src_data[3];
+    const AVPixFmtDescriptor *pix_desc =  &av_pix_fmt_descriptors[pix_fmt];
 
     int64_t out_frame_index = 0;
+    dcount = 0;
+    fd = fopen("/sdcard/ubitus/avc.yuv", "wb");
 
     do {
         buffer = NULL;
         frame = (Frame*)malloc(sizeof(Frame));
         
         if (!frame) {
-            frame = priv->end_frame;
+            UMLOG_ERR("---malloc frame fail");
+            //frame = priv->end_frame;
             frame->status = -2;
             decode_done   = 1;
             priv->end_frame  = NULL;
@@ -172,6 +273,9 @@ MediaSource::ReadOptions options;
         
         UMLOG_ERR("decode_thread read entery");
         frame->status = (*priv->decoder)->read(&buffer, &options);
+        //options.clearSeekTo();
+        //frame->status = OK;
+        //(*priv->source)->read(&buffer, &options);
         UMLOG_ERR("decode_thread read exit");
         if (frame->status == OK) {
             sp<MetaData> outFormat = (*priv->decoder)->getFormat();
@@ -179,21 +283,42 @@ MediaSource::ReadOptions options;
             outFormat->findInt32(kKeyHeight, &h);
             UMLOG_ERR("the data w is %d and h is %d", w, h);
             
-            UMSint size = ((avctx->outWidth + 8) * (avctx->outHeight + 8) * 3) >> 1;
-			frame->buffer = (uint8_t*)malloc(size);
-            UMLOG_ERR("decode_thread 1");
-            memcpy((uint8_t*)frame->buffer,(uint8_t*)buffer->data(), buffer->range_length());
+            avctx->outWidth = w;
+            avctx->outHeight = h;
             
-            UMLOG_ERR("decode_thread 2");
+            dcount++;
+            fwrite(buffer->data( ) + buffer->range_offset( ), 1, buffer->range_length(), fd);
+            
+            if(dcount == 10){
+                fclose(fd);
+            }
+            
+
+            src_linesize[0] = av_image_get_linesize(pix_fmt, w, 0);
+            src_linesize[1] = av_image_get_linesize(pix_fmt, w, 1);
+            src_linesize[2] = av_image_get_linesize(pix_fmt, w, 2);
+
+            src_data[0] = (uint8_t*)buffer->data();
+            src_data[1] = src_data[0] + src_linesize[0] * h;
+            src_data[2] = src_data[1] + src_linesize[1] * -(-h>>pix_desc->log2_chroma_h);
+            
+			frame->buffer = (uint8_t*)malloc(avctx->outDataLen);
+            //UMLOG_ERR("decode_thread 1");
+            memcpy((uint8_t*)frame->buffer,(uint8_t*)(buffer->data( ) + buffer->range_offset( )), buffer->range_length());
+            
+            //UMLOG_ERR("decode_thread 2");
             buffer->release();
         } else if (frame->status == INFO_FORMAT_CHANGED) {
+            UMLOG_ERR("frame->status == INFO_FORMAT_CHANGED");
             if (buffer)
                 buffer->release();
             free(frame);
             continue;
         } else {
+            UMLOG_ERR("frame->status != OK 2");
             decode_done = 1;
         }
+        
 push_frame:
         while (true) {
             pthread_mutex_lock(&priv->out_mutex);
@@ -204,12 +329,12 @@ push_frame:
             }
             break;
         }
-        UMLOG_ERR("decode_thread 3");
+        //UMLOG_ERR("decode_thread 3");
         priv->out_queue->push_back(frame);
         pthread_mutex_unlock(&priv->out_mutex);
     } while (!decode_done && !priv->stop_decode);
 
-    UMLOG_ERR("decode_thread read 4");
+    UMLOG_ERR("decode_thread read 4============");
     priv->thread_exited = true;
 #endif
 }
@@ -253,18 +378,27 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
         ret = -1;
         goto fail;
     }
+    
+    thiz->outWidth = params->width;
+    thiz->outHeight = params->height;
+    thiz->outDataLen = (thiz->outWidth * thiz->outHeight * 3) >> 1;
+    thiz->outData = (UMSint8* )malloc(thiz->outDataLen);
+    
     meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
     meta->setInt32(kKeyWidth, params->width);
     meta->setInt32(kKeyHeight, params->height);
 //    meta->setData(kKeyAVCC, kTypeAVCC, avctx->extradata, avctx->extradata_size);
 
-    android::ProcessState::self()->startThreadPool();
+//    android::ProcessState::self()->startThreadPool();
 
     priv->source    = new sp<MediaSource>();
     *priv->source   = new CustomSource(thiz, meta);
     priv->in_queue  = new List<Frame*>;
     priv->out_queue = new List<Frame*>;
     priv->thread_started = false;
+    priv->stop_decode = 0;
+    priv->thread_exited = false;
+    priv->source_done = false;
     //priv->ts_map    = new std::map<int64_t, TimeStamp>;
     priv->client    = new OMXClient;
     priv->end_frame = (Frame*)malloc(sizeof(Frame));
@@ -300,13 +434,13 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
 #if 1
     if (colorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar ||
         colorFormat == OMX_COLOR_FormatYUV420SemiPlanar)
-        pix_fmt = 1;
+        pix_fmt = PIX_FMT_NV21;
     else if (colorFormat == OMX_COLOR_FormatYCbYCr)
-        pix_fmt = 2;
+        pix_fmt = PIX_FMT_YUYV422;;
     else if (colorFormat == OMX_COLOR_FormatCbYCrY)
-        pix_fmt = 3;
+        pix_fmt = PIX_FMT_UYVY422;
     else
-        pix_fmt = 4;
+        pix_fmt = PIX_FMT_YUV420P;
 #endif
 
     outFormat->findCString(kKeyDecoderComponent, &priv->decoder_component);
@@ -317,6 +451,7 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
     pthread_mutex_init(&priv->in_mutex, NULL);
     pthread_mutex_init(&priv->out_mutex, NULL);
     pthread_cond_init(&priv->condition, NULL);
+    pthread_cond_init(&priv->condition2, NULL);
     return thiz;
 
 fail:
@@ -343,25 +478,21 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
     int status;
 
 
-    UMLOG_ERR("um_vdec_decode 2 priv is %p", priv);
+    //UMLOG_ERR("um_vdec_decode 2 priv is %p", priv);
     if (start == 0) {
         UMLOG_ERR("um_vdec_decode 2.1");
+        um_time_init();
         pthread_create(&priv->decode_thread_id, NULL, &decode_thread, thiz);
+        
+        //thiz->outData = (UMSint8* )malloc(((thiz->outWidth + 8) * (thiz->outHeight + 8) * 3) >> 1);
         UMLOG_ERR("um_vdec_decode 2.2");    
         start= 1;
     }
-    UMSint size = ((thiz->outWidth + 8) * (thiz->outHeight + 8) * 3) >> 1;
+   
     UMLOG_ERR("um_vdec_decode 3");
     if (!priv->source_done) {
-        if(!priv->dummy_buf) {
-            priv->dummy_buf = (uint8_t*)malloc(bufLen);
-            if (!priv->dummy_buf)
-                return -1;
-            priv->dummy_bufsize = bufLen;
-            memcpy(priv->dummy_buf, buf, bufLen);
-        }
-        UMLOG_ERR("um_vdec_decode 4");
-
+    
+        //UMLOG_ERR("um_vdec_decode 4");
         frame = (Frame*)malloc(sizeof(Frame));
         if (buf) {
             frame->status  = OK;
@@ -372,16 +503,16 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
                 free(frame);
                 return -1;
             }
-            uint8_t *ptr = (uint8_t *)buf;
-            UMLOG_ERR("um_vdec_decode 5");
-            memcpy(frame->buffer, ptr, bufLen);
+            //uint8_t *ptr = (uint8_t *)buf;
+            //UMLOG_ERR("um_vdec_decode 5");
+            memcpy(frame->buffer, (uint8_t *)buf, bufLen);
   
         } else {
             frame->status  = ERROR_END_OF_STREAM;
             priv->source_done = true;
         }
         
-        UMLOG_ERR("um_vdec_decode 6");
+        //UMLOG_ERR("um_vdec_decode 6");
 
         while (true) {
             if (priv->thread_exited) {
@@ -399,10 +530,11 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
             pthread_mutex_unlock(&priv->in_mutex);
             break;
         }
-        UMLOG_ERR("um_vdec_decode 7");
+        //UMLOG_ERR("um_vdec_decode 7");
     }
     
-    UMLOG_ERR("um_vdec_decode 8");
+    //UMLOG_ERR("um_vdec_decode 8");
+ 
     while (true) {
         pthread_mutex_lock(&priv->out_mutex);
         if (!priv->out_queue->empty()) break;
@@ -411,38 +543,34 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
             usleep(10000);
             continue;
         } else {
-            //return 0;
+            return -100;
         }
     }
-
+    
     UMLOG_ERR("um_vdec_decode 9");
     frame = *priv->out_queue->begin();
     priv->out_queue->erase(priv->out_queue->begin());
     pthread_mutex_unlock(&priv->out_mutex);
 
-    UMLOG_ERR("um_vdec_decode 10");
-    //ret_frame = frame->vframe;
-    memcpy(thiz->outData,frame->buffer, size);
+    //UMLOG_ERR("um_vdec_decode 10");
+
+    memcpy(thiz->outData,frame->buffer, thiz->outDataLen);
     status  = frame->status;
     free(frame->buffer);
     free(frame);
 
     UMLOG_ERR("um_vdec_decode 11");
     if (status == ERROR_END_OF_STREAM)
-        return 0;
+        return -1;
     if (status != OK) {
        
         UMLOG_ERR("Decode failed: %x\n", status);
         return -1;
     }
+    return bufLen;
 
-
-//    *got_frame = 1;
-//    *(AVFrame*)data = *ret_frame;
-    return 1;
 #endif
 
-//    return 0;
 }
 
 //int Stagefright_close(AVCodecContext *avctx)

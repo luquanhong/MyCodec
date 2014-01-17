@@ -25,6 +25,7 @@ static AVPacket mAvpkt;
 
 UMSint is_register_decoder;
 
+FILE* fd;
 
 /************************************************************************/
 /* ffmpeg video decoder                                                 */
@@ -163,12 +164,14 @@ static void ffmpeg_vdec_copyframe(UM_VideoDecoderCtx* thiz, UMSint8* data[3], UM
 	}
 }
 
-
+static int dcount;
 UMSint um_vdec_init(UMSint8* pkgname)
 {
 	
 	int ret;
 	char path[256] = {0};
+    dcount = 0;
+    fd = fopen("/sdcard/ubitus/ffmepg.yuv", "wb");
 	
 	sprintf(path, "/data/data/%s/lib", pkgname);
 	
@@ -296,7 +299,15 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
 		if(thiz->outData)
 		{
 			ffmpeg_vdec_copyframe(thiz, (UMSint8 **)priv->yuvFrame->data, priv->yuvFrame->linesize, thiz->outData);
-		}
+		
+            dcount++;
+            UMSint size = ((thiz->outWidth + 8) * (thiz->outHeight + 8) * 3) >> 1;
+            fwrite(thiz->outData, 1, size, fd);
+            
+            if(dcount == 10){
+                fclose(fd);
+            }
+        }
 	}
 
 	return nLen;

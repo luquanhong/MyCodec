@@ -16,8 +16,8 @@ ifeq ($(strip $(a)),)
 $(warning "a is not be null, you should use prama eg:"a=sw_ffmpeg"") 
 endif
 
-V_CODEC_PATH := $(LOCAL_PATH)/src/codecs/decoder/video/$(v)
-A_CODEC_PATH := $(LOCAL_PATH)/src/codecs/decoder/audio/$(a)
+V_CODEC_PATH := $(LOCAL_PATH)/src/codec/decoder/video/$(v)
+A_CODEC_PATH := $(LOCAL_PATH)/src/codec/decoder/audio/$(a)
 
 V_RENDER_PATH := $(LOCAL_PATH)/src/render/opengles2
 A_RENDER_PATH := 
@@ -44,6 +44,16 @@ $(warning "sw_ffmpeg will use the opengl render.")
 include $(V_RENDER_PATH)/config.mk
 endif
 
+ifeq ($(v),hw_stagefright)
+$(warning "hw_stagefright will use the opengl render.") 
+include $(V_RENDER_PATH)/config.mk
+endif
+
+ifeq ($(v),hw_stagefright_jellybean43)
+$(warning "hw_stagefright will use the opengl render.") 
+include $(V_RENDER_PATH)/config.mk
+endif
+
 #if audio or video use sw_ffmpeg, it must add um_load_ffmpeg.c
 ifeq ($(findstring sw_ffmpeg, $(a) $(v)),sw_ffmpeg)
 COM_SRC += src/utils/um_load_ffmpeg.c 
@@ -62,7 +72,7 @@ LOCAL_SRC_FILES := 	\
 		$(COM_SRC)	\
 		$(OEM_SRC)
 		
-
+$(warning $(LOCAL_C_INCLUDES))
 	
 LOCAL_LDLIBS := -llog 
 LOCAL_LDLIBS += $(OEM_LDLIBS)

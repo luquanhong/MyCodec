@@ -1,5 +1,5 @@
-CODEC_H_PATH	= $(PROJECT_PATH)/src/codecs/decoder/audio/sw_opencore
-CODEC_A_PATH	= src/codecs/decoder/audio/sw_opencore
+CODEC_H_PATH	= $(PROJECT_PATH)/src/codec/decoder/audio/sw_opencore
+CODEC_A_PATH	= src/codec/decoder/audio/sw_opencore
 
 OEM_INC	+= $(CODEC_H_PATH)/OEM/include
 

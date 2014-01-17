@@ -177,7 +177,7 @@ void printPlayerlogToFile(char* msg)
 		fclose(fd); 
 	}
 }
-
+FILE *fd=NULL;
 
 /*!
 *	\brief 	Constructor function of the UMMediaPlayer 
@@ -211,7 +211,9 @@ UMMediaPlayer::UMMediaPlayer(int codectype, int width, int height, int avccmp):
         UMLOG_ERR("Failed to connect to OMXClient.");
         return ;
     }
-	
+    
+	fd = fopen("/sdcard/ubitus/decodedata.yuv", "a");
+    
    // mInitCheck = OK;
 	mVideoRenderer=NULL;
 	mVideoSource=NULL;
@@ -225,7 +227,7 @@ UMMediaPlayer::UMMediaPlayer(int codectype, int width, int height, int avccmp):
 */
 UMMediaPlayer::~UMMediaPlayer()
 {
-
+    
 }
 
 /*!
@@ -394,6 +396,18 @@ void* UMMediaPlayer::videoWrapper(void *me)
     return NULL;
 }
 
+void printPDecodeDateToFile(char* msg)
+{
+	
+	
+	if(fd!=NULL)
+	{
+		fwrite(msg,sizeof( char),strlen(msg),fd);
+		
+	}
+}
+
+static int dcount;
 /*!
 *	\brief	The decode thread function. 
 *			The main Loop is used to read data from decoder, and put them to render. 
@@ -405,7 +419,7 @@ void UMMediaPlayer::videoEntry(void)
 	MediaBuffer *buffer;
 	MediaSource::ReadOptions options;
 	mVideoStartTime = 0;
-
+    dcount =0;
 	UMLOG_ERR("videoEntry() ---- mVideoDecoder->start() begin");
 	status_t err = mVideoDecoder->start();
 
@@ -431,6 +445,7 @@ void UMMediaPlayer::videoEntry(void)
 		status_t err = mVideoDecoder->read(&buffer, &options);
 		options.clearSeekTo();
 
+        
 		if(err == INFO_FORMAT_CHANGED)
 		{
 			UMLOG_ERR("VideoSource signalled format change.");                                       
@@ -447,6 +462,15 @@ void UMMediaPlayer::videoEntry(void)
 			mPlaying = false;
 			continue;
 		}
+        
+        dcount++;
+        printPDecodeDateToFile((char*)buffer->data());
+        
+        if(dcount == 10){
+             if(fd != NULL){
+                fclose(fd); 
+    }
+        }
 
 		if(buffer == NULL)
 		{
@@ -490,6 +514,8 @@ void UMMediaPlayer::videoEntry(void)
 
 		displayOrDiscardFrame(&lastBuffer, buffer, 0);
 	}
+    
+   
 
 	releaseBufferIfNonNULL(&lastBuffer);
 	shutdownVideoDecoder();
@@ -631,7 +657,7 @@ void UMMediaPlayer::setVideoDecoder(const sp <UMMediaSource >  &source)
 
 status_t UMMediaPlayer::setNativeWindow(const sp<ANativeWindow> &native) 
 {
-    mNativeWindow = native;
+    mNativeWindow = NULL;//native;
     return OK;
 }
 
