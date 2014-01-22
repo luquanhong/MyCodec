@@ -40,6 +40,8 @@ extern "C" {
 //#include "internal.h"
 }
 
+enum PixelFormat pix_fmt;
+
 using namespace android;
 
 
@@ -54,7 +56,7 @@ struct Frame {
 //    AVFrame *vframe;
 };
 
-enum PixelFormat pix_fmt;
+
 
 struct StagefrightContext {
 
@@ -236,6 +238,7 @@ private:
 FILE* fd;
 static int dcount;
 
+
 void* decode_thread(void *arg)
 {
 
@@ -252,6 +255,7 @@ void* decode_thread(void *arg)
     
     int src_linesize[3];
     const uint8_t *src_data[3];
+    uint8_t yuv420p[800*480*3/2];
     const AVPixFmtDescriptor *pix_desc =  &av_pix_fmt_descriptors[pix_fmt];
 
     int64_t out_frame_index = 0;
@@ -281,7 +285,7 @@ void* decode_thread(void *arg)
             sp<MetaData> outFormat = (*priv->decoder)->getFormat();
             outFormat->findInt32(kKeyWidth , &w);
             outFormat->findInt32(kKeyHeight, &h);
-            UMLOG_ERR("the data w is %d and h is %d", w, h);
+            UMLOG_ERR("the data w is %d and h is %d and buffer range is %d", w, h, buffer->range_length());
             
             avctx->outWidth = w;
             avctx->outHeight = h;
@@ -293,20 +297,13 @@ void* decode_thread(void *arg)
                 fclose(fd);
             }
             
-
-            src_linesize[0] = av_image_get_linesize(pix_fmt, w, 0);
-            src_linesize[1] = av_image_get_linesize(pix_fmt, w, 1);
-            src_linesize[2] = av_image_get_linesize(pix_fmt, w, 2);
-
-            src_data[0] = (uint8_t*)buffer->data();
-            src_data[1] = src_data[0] + src_linesize[0] * h;
-            src_data[2] = src_data[1] + src_linesize[1] * -(-h>>pix_desc->log2_chroma_h);
-            
 			frame->buffer = (uint8_t*)malloc(avctx->outDataLen);
             //UMLOG_ERR("decode_thread 1");
-            memcpy((uint8_t*)frame->buffer,(uint8_t*)(buffer->data( ) + buffer->range_offset( )), buffer->range_length());
+            memcpy((uint8_t*)frame->buffer,(uint8_t*)(buffer->data( ) + buffer->range_offset( )), buffer->range_length());            
+            //memcpy((uint8_t*)frame->buffer,yuv420p, buffer->range_length());            
             
-            //UMLOG_ERR("decode_thread 2");
+            
+            UMLOG_ERR("decode_thread 2");
             buffer->release();
         } else if (frame->status == INFO_FORMAT_CHANGED) {
             UMLOG_ERR("frame->status == INFO_FORMAT_CHANGED");
@@ -329,12 +326,12 @@ push_frame:
             }
             break;
         }
-        //UMLOG_ERR("decode_thread 3");
+        UMLOG_ERR("decode_thread 3");
         priv->out_queue->push_back(frame);
         pthread_mutex_unlock(&priv->out_mutex);
     } while (!decode_done && !priv->stop_decode);
 
-    UMLOG_ERR("decode_thread read 4============");
+    //UMLOG_ERR("decode_thread read 4============");
     priv->thread_exited = true;
 #endif
 }
@@ -436,7 +433,7 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
         colorFormat == OMX_COLOR_FormatYUV420SemiPlanar)
         pix_fmt = PIX_FMT_NV21;
     else if (colorFormat == OMX_COLOR_FormatYCbYCr)
-        pix_fmt = PIX_FMT_YUYV422;;
+        pix_fmt = PIX_FMT_YUYV422;
     else if (colorFormat == OMX_COLOR_FormatCbYCrY)
         pix_fmt = PIX_FMT_UYVY422;
     else
@@ -489,7 +486,7 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
         start= 1;
     }
    
-    UMLOG_ERR("um_vdec_decode 3");
+    //UMLOG_ERR("um_vdec_decode 3");
     if (!priv->source_done) {
     
         //UMLOG_ERR("um_vdec_decode 4");
@@ -547,7 +544,7 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
         }
     }
     
-    UMLOG_ERR("um_vdec_decode 9");
+    //UMLOG_ERR("um_vdec_decode 9");
     frame = *priv->out_queue->begin();
     priv->out_queue->erase(priv->out_queue->begin());
     pthread_mutex_unlock(&priv->out_mutex);
@@ -559,9 +556,9 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
     free(frame->buffer);
     free(frame);
 
-    UMLOG_ERR("um_vdec_decode 11");
+    //UMLOG_ERR("um_vdec_decode 11");
     if (status == ERROR_END_OF_STREAM)
-        return -1;
+        return -10;
     if (status != OK) {
        
         UMLOG_ERR("Decode failed: %x\n", status);
