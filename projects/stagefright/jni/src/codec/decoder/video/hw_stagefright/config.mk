@@ -25,4 +25,4 @@ OEM_SRC += $(CODEC_R_PATH)/um_video_dec.cpp
 
 LFLAGS		+=
 
-OEM_LDLIBS	+= -L$(CODEC_PATH)/OEM/libs -lavutil_ub -lOpenMAXAL -lOpenSLES -lvorbisidec -lz -lutils -lsysutils -lstagefright_foundation -landroid -lcutils -licuuc -lui -ldl -lbinder -landroid_runtime -lstagefright -lstagefright_omx -lmedia -lstagefright_avc_common -lstagefright_amrnb_common -lsurfaceflinger -lgui
+OEM_LDLIBS	+= -L$(CODEC_PATH)/OEM/libs -lOpenMAXAL -lOpenSLES -lvorbisidec -lz -lutils -lsysutils -lstagefright_foundation -landroid -lcutils -licuuc -lui -ldl -lbinder -landroid_runtime -lstagefright -lstagefright_omx -lmedia -lstagefright_avc_common -lstagefright_amrnb_common -lsurfaceflinger -lgui

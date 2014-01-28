@@ -12,9 +12,6 @@
 #include <media/stagefright/OMXCodec.h>
 #include <media/IOMX.h>
 #include <utils/List.h>
-//#include <new>
-//#include <map>
-//#include <gui/Surface.h>
 #include <utils/RefBase.h>
 #include <media/stagefright/OMXClient.h>
 #include <media/stagefright/MediaSource.h>
@@ -33,18 +30,16 @@
 #define UINT64_C(c) (c ## ULL)
 #endif 
 
-extern "C" {
-#include "libavcodec/avcodec.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/pixfmt.h"
-//#include "internal.h"
-}
 
-enum PixelFormat pix_fmt;
+#ifdef UMLOG_ERR
+#undef UMLOG_ERR
+#define UMLOG_ERR(...)  do{}while(0)
+
+#endif
+
+#define OMX_QCOM_COLOR_FormatYVU420SemiPlanar 0x7FA30C00
 
 using namespace android;
-
-
 
 
 struct Frame {
@@ -53,7 +48,6 @@ struct Frame {
     int64_t time;
     int key;
     uint8_t *buffer;
-//    AVFrame *vframe;
 };
 
 
@@ -72,13 +66,7 @@ struct StagefrightContext {
     bool source_done;
     volatile sig_atomic_t  thread_exited, stop_decode;
     bool thread_started;
-    
-//    AVFrame *prev_frame;
-//    std::map<int64_t, TimeStamp> *ts_map;
     int64_t frame_index;
-
-    uint8_t *dummy_buf;
-    int dummy_bufsize;
 
     OMXClient *client;
     sp<MediaSource> *decoder;
@@ -137,10 +125,6 @@ UMUint um_util_getCurrentTick(void)
 {
 	return (get_countTick() - m_um_sys_currTick_baseline);
 }
-
-
-
-
 
 
 class CustomSource : public MediaSource {
@@ -256,7 +240,6 @@ void* decode_thread(void *arg)
     int src_linesize[3];
     const uint8_t *src_data[3];
     uint8_t yuv420p[800*480*3/2];
-    const AVPixFmtDescriptor *pix_desc =  &av_pix_fmt_descriptors[pix_fmt];
 
     int64_t out_frame_index = 0;
     dcount = 0;
@@ -278,30 +261,31 @@ void* decode_thread(void *arg)
         UMLOG_ERR("decode_thread read entery");
         frame->status = (*priv->decoder)->read(&buffer, &options);
         //options.clearSeekTo();
-        //frame->status = OK;
-        //(*priv->source)->read(&buffer, &options);
         UMLOG_ERR("decode_thread read exit");
         if (frame->status == OK) {
             sp<MetaData> outFormat = (*priv->decoder)->getFormat();
             outFormat->findInt32(kKeyWidth , &w);
             outFormat->findInt32(kKeyHeight, &h);
-            UMLOG_ERR("the data w is %d and h is %d and buffer range is %d", w, h, buffer->range_length());
+            UMLOG_INFO("the data w is %d and h is %d and buffer range is %d", w, h, buffer->range_length());
             
+            // The OMX.SEC decoder doesn't signal the modified width/height
+            if (priv->decoder_component && !strncmp(priv->decoder_component, "OMX.SEC", 7) &&
+                (w & 15 || h & 15)) {
+                if (((w + 15)&~15) * ((h + 15)&~15) * 3/2 == buffer->range_length()) {
+                    w = (w + 15)&~15;
+                    h = (h + 15)&~15;
+                }
+            }
+            UMLOG_INFO("the data w is %d and h is %d ", w, h);
             avctx->outWidth = w;
             avctx->outHeight = h;
             
-            dcount++;
-            fwrite(buffer->data( ) + buffer->range_offset( ), 1, buffer->range_length(), fd);
-            
-            if(dcount == 10){
-                fclose(fd);
-            }
-            
-			frame->buffer = (uint8_t*)malloc(avctx->outDataLen);
+            UMLOG_ERR("buffer->range_length() is %d avctx->outDataLen is %d", buffer->range_length(), avctx->outDataLen);
+			frame->buffer = (uint8_t*)malloc(buffer->range_length());
             //UMLOG_ERR("decode_thread 1");
             memcpy((uint8_t*)frame->buffer,(uint8_t*)(buffer->data( ) + buffer->range_offset( )), buffer->range_length());            
             //memcpy((uint8_t*)frame->buffer,yuv420p, buffer->range_length());            
-            
+            frame->size = buffer->range_length();
             
             UMLOG_ERR("decode_thread 2");
             buffer->release();
@@ -312,7 +296,7 @@ void* decode_thread(void *arg)
             free(frame);
             continue;
         } else {
-            UMLOG_ERR("frame->status != OK 2");
+            UMLOG_INFO("frame->status != OK and ret = %d", ret);
             decode_done = 1;
         }
         
@@ -326,15 +310,18 @@ push_frame:
             }
             break;
         }
+        
         UMLOG_ERR("decode_thread 3");
         priv->out_queue->push_back(frame);
         pthread_mutex_unlock(&priv->out_mutex);
     } while (!decode_done && !priv->stop_decode);
 
-    //UMLOG_ERR("decode_thread read 4============");
+    UMLOG_INFO("decode_thread exited");
     priv->thread_exited = true;
 #endif
 }
+
+int pixFormat;
 
 UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
 {
@@ -353,22 +340,6 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
     
     UMLOG_ERR("um_vdec_create  priv is %p", priv);
     
-    if(params->codec == CODEC_UID_MPEG4 )
-    {
-        UMLOG_INFO("the codeType is params->codec = CODEC_UID_MPEG4");
-        codeType = 1;
-    }
-    else if(params->codec == CODEC_UID_H264)
-    {
-        UMLOG_INFO("the codeType is params->codec = CODEC_UID_H264");
-        codeType = 2;	
-        //avccmp = params->avccmp;
-    }
-    else
-    {
-        UMLOG_ERR("the codeType not support.");
-        return UM_NULL;
-    }
 
     meta = new MetaData;
     if (meta == NULL) {
@@ -381,7 +352,26 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
     thiz->outDataLen = (thiz->outWidth * thiz->outHeight * 3) >> 1;
     thiz->outData = (UMSint8* )malloc(thiz->outDataLen);
     
-    meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+    if(params->codec == CODEC_UID_MPEG4 )
+    {
+        UMLOG_INFO("the codeType is params->codec = CODEC_UID_MPEG4");
+        meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_MPEG4);
+        codeType = 1;
+    }
+    else if(params->codec == CODEC_UID_H264)
+    {
+        UMLOG_INFO("the codeType is params->codec = CODEC_UID_H264");
+        codeType = 2;	
+        meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+        //avccmp = params->avccmp;
+    }
+    else
+    {
+        UMLOG_ERR("the codeType not support.");
+        return UM_NULL;
+    }
+    
+    
     meta->setInt32(kKeyWidth, params->width);
     meta->setInt32(kKeyHeight, params->height);
 //    meta->setData(kKeyAVCC, kTypeAVCC, avctx->extradata, avctx->extradata_size);
@@ -427,17 +417,18 @@ UM_VideoDecoderCtx* um_vdec_create(UM_CodecParams* params)
     outFormat = (*priv->decoder)->getFormat();
     outFormat->findInt32(kKeyColorFormat, &colorFormat);
 
-    UMLOG_ERR("kKeyColorFormat is %d", colorFormat);
+    UMLOG_INFO("kKeyColorFormat is %d", colorFormat);
+    pixFormat = colorFormat;
 #if 1
     if (colorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar ||
         colorFormat == OMX_COLOR_FormatYUV420SemiPlanar)
-        pix_fmt = PIX_FMT_NV21;
+        UMLOG_INFO("kKeyColorFormat is PIX_FMT_NV21");
     else if (colorFormat == OMX_COLOR_FormatYCbYCr)
-        pix_fmt = PIX_FMT_YUYV422;
+        UMLOG_INFO("kKeyColorFormat is PIX_FMT_YUYV422");
     else if (colorFormat == OMX_COLOR_FormatCbYCrY)
-        pix_fmt = PIX_FMT_UYVY422;
+        UMLOG_INFO("kKeyColorFormat is PIX_FMT_UYVY422");
     else
-        pix_fmt = PIX_FMT_YUV420P;
+        UMLOG_INFO("kKeyColorFormat is PIX_FMT_YUV420P");
 #endif
 
     outFormat->findCString(kKeyDecoderComponent, &priv->decoder_component);
@@ -463,9 +454,75 @@ fail:
 }
 
 static int start = 0;
+static void NV21toI420(uint8_t* yuv420sp, uint8_t* yuv420, int width, int height)
+{
+	//LOGD("Hello NV21toI420!");
 
-//static int Stagefright_decode_frame(AVCodecContext *avctx, void *data,
-//                                    int *got_frame, AVPacket *avpkt)
+    if (yuv420sp == NULL ||yuv420 == NULL) return;
+
+    int framesize = width*height;
+    int i = 0, j = 0;
+
+    //copy y
+    for (i = 0; i < framesize; i++)
+    {
+        yuv420[i] = yuv420sp[i];
+    }
+
+    //LOGD("NV21toI420! copy y done");
+    i = 0;
+    for (j = 0; j < framesize/2; j+=2)
+    {
+        yuv420[i + framesize*5/4] = yuv420sp[j+framesize];
+        i++;
+    }
+
+    //LOGD("NV21toI420! copy v done");
+    i = 0;
+    for(j = 1; j < framesize/2;j+=2)
+    {
+        yuv420[i+framesize] = yuv420sp[j+framesize];
+        i++;
+    }
+
+    //LOGD("NV21toI420! copy u done");
+}
+
+
+static void NV12toI420(uint8_t* yuv420sp, uint8_t* yuv420, int width, int height)
+{
+	//LOGD("Hello NV21toI420!");
+
+    if (yuv420sp == NULL ||yuv420 == NULL) return;
+
+    int framesize = width*height;
+    int i = 0, j = 0;
+
+    //copy y
+    for (i = 0; i < framesize; i++)
+    {
+        yuv420[i] = yuv420sp[i];
+    }
+
+    //LOGD("NV21toI420! copy y done");
+    i = 0;
+    for (j = 0; j < framesize/2; j+=2)
+    {
+        yuv420[i + framesize] = yuv420sp[j+framesize];
+        i++;
+    }
+
+    //LOGD("NV21toI420! copy v done");
+    i = 0;
+    for(j = 1; j < framesize/2;j+=2)
+    {
+        yuv420[i+framesize*5/4] = yuv420sp[j+framesize];
+        i++;
+    }
+
+    //LOGD("NV21toI420! copy u done");
+}
+
 UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
 {
     UMLOG_ERR("um_vdec_decode 1");
@@ -476,14 +533,14 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
 
 
     //UMLOG_ERR("um_vdec_decode 2 priv is %p", priv);
-    if (start == 0) {
+    if (priv->thread_started == false) {
         UMLOG_ERR("um_vdec_decode 2.1");
         um_time_init();
         pthread_create(&priv->decode_thread_id, NULL, &decode_thread, thiz);
         
         //thiz->outData = (UMSint8* )malloc(((thiz->outWidth + 8) * (thiz->outHeight + 8) * 3) >> 1);
         UMLOG_ERR("um_vdec_decode 2.2");    
-        start= 1;
+        priv->thread_started = true;
     }
    
     //UMLOG_ERR("um_vdec_decode 3");
@@ -534,9 +591,9 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
  
     while (true) {
         pthread_mutex_lock(&priv->out_mutex);
-        if (!priv->out_queue->empty()) break;
+        if (priv->out_queue->empty() == false) break;
         pthread_mutex_unlock(&priv->out_mutex);
-        if (priv->source_done) {
+        if (priv->source_done == true) {
             usleep(10000);
             continue;
         } else {
@@ -550,15 +607,29 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
     pthread_mutex_unlock(&priv->out_mutex);
 
     //UMLOG_ERR("um_vdec_decode 10");
+    
+    if(pixFormat == 21){
+    
+        if( frame->size != thiz->outDataLen){
+            UMLOG_INFO("ignore the frame, frame->size is %d and need is %d", frame->size, thiz->outDataLen);
+        }
+        UMLOG_ERR("um_vdec_decode thiz->outDataLen is %d  thiz->outWidth is %d  thiz->outHeight is %d", thiz->outDataLen, thiz->outWidth, thiz->outHeight);
+        uint8_t* i420 = (uint8_t* )malloc(thiz->outDataLen);
+        NV12toI420(frame->buffer, i420, thiz->outWidth, thiz->outHeight);
 
-    memcpy(thiz->outData,frame->buffer, thiz->outDataLen);
+        memcpy(thiz->outData,i420, thiz->outDataLen);
+        
+        if(i420 != NULL) free(i420);
+    
+    }else {
+        memcpy(thiz->outData,frame->buffer, frame->size);
+    }
+    
+    
     status  = frame->status;
     free(frame->buffer);
     free(frame);
 
-    //UMLOG_ERR("um_vdec_decode 11");
-    if (status == ERROR_END_OF_STREAM)
-        return -10;
     if (status != OK) {
        
         UMLOG_ERR("Decode failed: %x\n", status);
@@ -574,28 +645,28 @@ UMSint um_vdec_decode(UM_VideoDecoderCtx* thiz, UMSint8* buf, UMSint bufLen)
 UMSint um_vdec_destroy(UM_VideoDecoderCtx* thiz)
 {
 
-#if 0
-    StagefrightContext *s = (StagefrightContext*)avctx->priv_data;
+#if 1
+    StagefrightContext *s = (StagefrightContext*)thiz->priv;
     Frame *frame;
 
     if (s->thread_started) {
         if (!s->thread_exited) {
             s->stop_decode = 1;
+            UMLOG_INFO("um_vdec_destroy 1");
 
             // Make sure decode_thread() doesn't get stuck
             pthread_mutex_lock(&s->out_mutex);
             while (!s->out_queue->empty()) {
                 frame = *s->out_queue->begin();
                 s->out_queue->erase(s->out_queue->begin());
-                if (frame->vframe)
-                    av_frame_free(&frame->vframe);
-                av_freep(&frame);
+                free(frame);
             }
             pthread_mutex_unlock(&s->out_mutex);
 
             // Feed a dummy frame prior to signalling EOF.
             // This is required to terminate the decoder(OMX.SEC)
             // when only one frame is read during stream info detection.
+            /*
             if (s->dummy_buf && (frame = (Frame*)av_mallocz(sizeof(Frame)))) {
                 frame->status = OK;
                 frame->size   = s->dummy_bufsize;
@@ -607,65 +678,60 @@ UMSint um_vdec_destroy(UM_VideoDecoderCtx* thiz)
                 pthread_mutex_unlock(&s->in_mutex);
                 s->dummy_buf = NULL;
             }
+            */
 
+            UMLOG_INFO("um_vdec_destroy 2");
+            
             pthread_mutex_lock(&s->in_mutex);
-            s->end_frame->status = ERROR_END_OF_STREAM;
+            s->end_frame->status = -2;
             s->in_queue->push_back(s->end_frame);
             pthread_cond_signal(&s->condition);
             pthread_mutex_unlock(&s->in_mutex);
             s->end_frame = NULL;
         }
-
+UMLOG_INFO("um_vdec_destroy 3");
         pthread_join(s->decode_thread_id, NULL);
-
-        if (s->prev_frame)
-            av_frame_free(&s->prev_frame);
-
+UMLOG_INFO("um_vdec_destroy 4");
         s->thread_started = false;
     }
-
+UMLOG_INFO("um_vdec_destroy 5");
     while (!s->in_queue->empty()) {
         frame = *s->in_queue->begin();
         s->in_queue->erase(s->in_queue->begin());
-        if (frame->size)
-            av_freep(&frame->buffer);
-        av_freep(&frame);
+        if (frame->buffer)
+            free(frame->buffer);
+        free(frame);
     }
-
+UMLOG_INFO("um_vdec_destroy 6");
     while (!s->out_queue->empty()) {
         frame = *s->out_queue->begin();
         s->out_queue->erase(s->out_queue->begin());
-        if (frame->vframe)
-            av_frame_free(&frame->vframe);
-        av_freep(&frame);
+        
+        free(frame);
     }
-
+UMLOG_INFO("um_vdec_destroy 7");
     (*s->decoder)->stop();
     s->client->disconnect();
 
-    if (s->decoder_component)
-        av_freep(&s->decoder_component);
-    av_freep(&s->dummy_buf);
-    av_freep(&s->end_frame);
+    //free(s->end_frame);
 
     // Reset the extradata back to the original mp4 format, so that
     // the next invocation (both when decoding and when called from
     // av_find_stream_info) get the original mp4 format extradata.
-    av_freep(&avctx->extradata);
-    avctx->extradata = s->orig_extradata;
-    avctx->extradata_size = s->orig_extradata_size;
+    //av_freep(&avctx->extradata);
+    //avctx->extradata = s->orig_extradata;
+    //avctx->extradata_size = s->orig_extradata_size;
 
     delete s->in_queue;
     delete s->out_queue;
-    delete s->ts_map;
     delete s->client;
     delete s->decoder;
     delete s->source;
-
+UMLOG_INFO("um_vdec_destroy 8");
     pthread_mutex_destroy(&s->in_mutex);
     pthread_mutex_destroy(&s->out_mutex);
     pthread_cond_destroy(&s->condition);
-    av_bitstream_filter_close(s->bsfc);
+    //av_bitstream_filter_close(s->bsfc);
 #endif
     return 0;
 }
